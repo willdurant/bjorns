@@ -57,7 +57,16 @@ NumericArray :: struct($T: typeid) where intrinsics.type_is_integer(T) || intrin
     is_mutable: bool,
 }
 
-initialise_array :: proc($T: typeid, N: int, allocator := context.allocator) -> (NumericArray(T), bool) {
+StringArray :: struct {
+    values: []byte
+    validity: []byte
+    offsets: []i32
+    a_type: typeid
+    length: int
+    is_mutable: bool
+}
+
+initialise_array :: proc($T: typeid, N: int, allocator := context.allocator, offset_length: i32 = 0) -> (NumericArray(T), bool) {
     if N <= 0 {
         return {}, false
     }
@@ -65,10 +74,24 @@ initialise_array :: proc($T: typeid, N: int, allocator := context.allocator) -> 
     if intrinsics.type_is_integer(T) || intrinsics.type_is_float(T) {
         array := NumericArray(T) {
             values = make([]T, N, allocator),
-            validity = make([]byte, N, allocator),
+            validity = make([]byte, (N + 7) / 8, allocator),
             a_type = T,
             length = N,
             is_mutable = false,
+        }
+
+        return array, true
+    }
+
+    if intrinsics.type_is_string(T) {
+        string_length = offset_length+1
+        array := StringArray {
+            values = make([]byte, N, allocator)
+            validity = make([]byte, (string_length + 7) / 8, allocator)
+            offsets = make([]i32, offset_length, allocator)
+            a_type = T
+            length = N
+            is_mutable = false
         }
 
         return array, true
@@ -90,12 +113,19 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
         return {}, false
     }
 
+    // TODO(will): need to implement string array reading
     if intrinsics.type_is_integer(T) {
         for value, i in values {
+            // TODO(will): need to manage potential int overflow
             trimmed := strings.trim_space(value)
             n, ok := strconv.parse_int(trimmed)
             new_array.values[i] = ok ? T(n) : 0
-            new_array.validity[i] = ok ? 1 : 0
+
+            byte_index := i / 8
+            bit_position := i % 8
+            if ok {
+                new_array.validity[byte_index] |= 1 << bit_position
+            }
         }
 
         return new_array, true
@@ -106,7 +136,12 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
             trimmed := strings.trim_space(value)
             n, ok := strconv.parse_f32(trimmed)
             new_array.values[i] = ok ? T(n) : 0
-            new_array.validity[i] = ok ? 1 : 0
+            
+            byte_index := i / 8
+            bit_position := i % 8
+            if ok {
+                new_array.validity[byte_index] |= 1 << bit_position
+            }
         }
 
         return new_array, true
@@ -117,7 +152,12 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
             trimmed := strings.trim_space(value)
             n, ok := strconv.parse_f64(trimmed)
             new_array.values[i] = ok ? T(n) : 0
-            new_array.validity[i] = ok ? 1 : 0
+            
+            byte_index := i / 8
+            bit_position := i % 8
+            if ok {
+                new_array.validity[byte_index] |= 1 << bit_position
+            }
         }
 
         return new_array, true
@@ -129,9 +169,13 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
 
 
 print_array :: proc(array: $A/NumericArray($T)) {
+    // TODO(will): implement string array printing
     if intrinsics.type_is_integer(T) {
         for i := 0; i < array.length; i += 1 {
-            if array.validity[i] == 1 {
+            byte_index := i / 8
+            bit_position := i % 8
+
+            if (new_array.validity[byte_index] >> bit_position) & 1 {
                 fmt.printfln("%d", array.values[i])
             } else {
                 fmt.println("null")
@@ -141,7 +185,10 @@ print_array :: proc(array: $A/NumericArray($T)) {
 
     if intrinsics.type_is_float(T) {
         for i := 0; i < array.length; i += 1 {
-            if array.validity[i] == 1 {
+            byte_index := i / 8
+            bit_position := i % 8
+
+            if (new_array.validity[byte_index] >> bit_position) & 1 {
                 fmt.printfln("%f", array.values[i])
             } else {
                 fmt.println("null")
