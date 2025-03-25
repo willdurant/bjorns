@@ -66,7 +66,7 @@ StringArray :: struct {
     is_mutable: bool
 }
 
-initialise_array :: proc($T: typeid, N: int, allocator := context.allocator, offset_length: i32 = 0) -> (NumericArray(T), bool) {
+initialise_array :: proc($T: typeid, N: int, allocator := context.allocator, string_count: i32 = 0) -> (NumericArray(T), bool) {
     if N <= 0 {
         return {}, false
     }
@@ -84,10 +84,10 @@ initialise_array :: proc($T: typeid, N: int, allocator := context.allocator, off
     }
 
     if intrinsics.type_is_string(T) {
-        string_length = offset_length+1
+        offset_length = string_count-1
         array := StringArray {
             values = make([]byte, N, allocator)
-            validity = make([]byte, (string_length + 7) / 8, allocator)
+            validity = make([]byte, (string_count + 7) / 8, allocator)
             offsets = make([]i32, offset_length, allocator)
             a_type = T
             length = N
@@ -101,20 +101,19 @@ initialise_array :: proc($T: typeid, N: int, allocator := context.allocator, off
 }
 
 array_from_string :: proc($T: typeid, data: string, allocator := context.allocator) -> (NumericArray(T), bool) {
-    values := strings.split(data, ",")
+    values := strings.split(data, ",") // TODO(will): Change to temporary allocator?
 
     if len(values) == 0 {
         return {}, false
     }
 
-    new_array, ok := initialise_array(T, len(values), allocator)
-
-    if !ok {
-        return {}, false
-    }
-
     // TODO(will): need to implement string array reading
+    // TODO(will): Make this DRY
     if intrinsics.type_is_integer(T) {
+        new_array, ok := initialise_array(T, len(values), allocator)
+        if !ok {
+            return {}, false
+        }
         for value, i in values {
             // TODO(will): need to manage potential int overflow
             trimmed := strings.trim_space(value)
@@ -132,6 +131,10 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
     }
 
     if T == f32 {
+        new_array, ok := initialise_array(T, len(values), allocator)
+        if !ok {
+            return {}, false
+        }
         for value, i in values {
             trimmed := strings.trim_space(value)
             n, ok := strconv.parse_f32(trimmed)
@@ -148,6 +151,10 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
     }
 
     if T == f64 {
+        new_array, ok := initialise_array(T, len(values), allocator)
+        if !ok {
+            return {}, false
+        }
         for value, i in values {
             trimmed := strings.trim_space(value)
             n, ok := strconv.parse_f64(trimmed)
@@ -161,7 +168,37 @@ array_from_string :: proc($T: typeid, data: string, allocator := context.allocat
         }
 
         return new_array, true
-    } 
+    }
+    
+    if intrinsics.type_is_string(T) {
+        string_count = len(values)
+        new_array, ok := initialise_array(string, len(data), allocator, string_count)
+        if !ok {
+            return {}, false
+        }
+        
+        strings_combined, ok := strings.concatenate_safe(values) // TODO(will): Change to temporary allocator?
+        if !ok {
+            return {}, false
+        }
+        copy(new_array.data, transmute([]byte)strings_combined)
+
+        byte_count := 0
+        for value, i in values {
+            if i < string_count-1 {
+                byte_count += len(value)
+                new_array.offsets[i] = byte_count+1
+            }
+
+            byte_index := i / 8
+            bit_position := i % 8
+            if value != "" {
+                new_array.validity[byte_index] |= 1 << bit_position
+            }
+        }
+
+        return new_array, true
+    }
 
     return {}, false
 }
