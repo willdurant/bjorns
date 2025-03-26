@@ -233,7 +233,7 @@ print_string_array :: proc(array: StringArray) {
         bit_position := u64(i) % 8
 
         // Check if we're within bounds of the validity array
-        is_valid := byte_index < len(array.validity) && 
+        is_valid := byte_index < u64(len(array.validity)) && 
                     ((array.validity[byte_index] >> bit_position) & 1) == 1
                     
         if is_valid {
