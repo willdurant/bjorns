@@ -10,6 +10,7 @@ import "core:encoding/csv"
 import "core:os"
 import "core:text/table"
 import "core:math"
+import "core:unicode/utf8"
 
 Type_Category :: enum {
     // Numeric types
@@ -438,20 +439,19 @@ read_csv :: proc(filename: string, allocator := context.allocator) -> (DataFrame
     
     r: csv.Reader
 	r.trim_leading_space  = true
-	r.reuse_record        = true // Without it you have to delete(record)
-	r.reuse_record_buffer = true // Without it you have to each of the fields within it
+	r.reuse_record        = false // Without it you have to delete(record)
+	r.reuse_record_buffer = false // Without it you have to each of the fields within it
 	defer csv.reader_destroy(&r)
 
-	csv_data, ok := os.read_entire_file(filename)
-	if ok {
-		csv.reader_init_with_string(&r, string(csv_data))
-	} else {
-		fmt.printfln("Unable to open file: %v", filename)
+    handle, handle_err := os.open(filename)
+	if handle_err != nil {
+		fmt.eprintfln("Error opening file: %v", filename)
 		return {}, false
 	}
-	defer delete(csv_data)
+	defer os.close(handle)
+	csv.reader_init(&r, os.stream_from_handle(handle))
 
-	records, err := csv.read_all(&r)
+	records, err := csv.read_all(&r) // TODO(will): Handle this allocation
 	if err != nil { /* Do something with CSV parse error */ }
 
 	defer {
@@ -461,15 +461,17 @@ read_csv :: proc(filename: string, allocator := context.allocator) -> (DataFrame
 		delete(records)
 	}
 
-    n_rows := len(records)-1
+    n_rows := len(records[1:])
     for column_name, i in records[0] {
         column_read_info := get_column_info(records[1:], i)
 
         switch column_read_info.category {
+            case int: add_numeric_column(&df, column_name, i, int, records[1:], allocator)
             case i8: add_numeric_column(&df, column_name, i, i8, records[1:], allocator)
             case i16: add_numeric_column(&df, column_name, i, i16, records[1:], allocator)
             case i32: add_numeric_column(&df, column_name, i, i32, records[1:], allocator)
             case i64: add_numeric_column(&df, column_name, i, i64, records[1:], allocator)
+            case uint: add_numeric_column(&df, column_name, i, uint, records[1:], allocator)
             case u8: add_numeric_column(&df, column_name, i, u8, records[1:], allocator)
             case u16: add_numeric_column(&df, column_name, i, u16, records[1:], allocator)
             case u32: add_numeric_column(&df, column_name, i, u32, records[1:], allocator)
@@ -508,14 +510,36 @@ handle_numeric_array :: proc(tbl: ^table.Table, row_idx, col_idx: int,
                 ((validity[byte_index] >> bit_position & 1) == 1)
                 
     if !is_valid {
-        table.set_cell_value(tbl, row_idx, col_idx, "null")
+        table.set_cell_value(tbl, row_idx+1, col_idx, "null")
     } else {
         value := values[row_idx]
-        table.set_cell_value(tbl, row_idx, col_idx, value)
+        table.set_cell_value(tbl, row_idx+1, col_idx, value)
     }
 }
 
-print_dataframe :: proc(df: DataFrame, max_rows: int = 10) {
+truncate_string_value :: proc(value: string, max_width: int) -> string {
+    if utf8.rune_count(value) <= max_width {
+        return value
+    }
+
+    trunc_value := strings.cut(value, 0, max_width)
+    return strings.concatenate({trunc_value, "..."}) // TODO(will): Manage this memory
+}
+
+truncate_bytes_value :: proc(value: []byte, max_width: int) -> string {
+    if utf8.rune_count(value) <= max_width {
+        return transmute(string)value
+    }
+
+    trunc_value := strings.cut(transmute(string)value, 0, max_width)
+    return strings.concatenate({trunc_value, "..."}) // TODO(will): Manage this memory
+}
+
+truncate_value :: proc{truncate_string_value, truncate_bytes_value}
+
+print_dataframe :: proc(df: DataFrame, max_rows: int = 10, max_width: int = 15) {
+    // TODO(will): Implement max columns to print, middle ellipsis column
+    // TODO(will): Print column types
     stdout := table.stdio_writer()
     tbl: table.Table
 	table.init(&tbl)
@@ -523,14 +547,14 @@ print_dataframe :: proc(df: DataFrame, max_rows: int = 10) {
 
     table.padding(&tbl, 1, 1) // Left/right padding of cells
 
-    for column in df.column_order {
-        table.header(&tbl, column)
+    for column_name in df.column_order[:] {
+        table.header(&tbl, truncate_value(column_name, max_width))
     }
 
     total_rows := math.min(max_rows, df.shape[0])
     for row_idx in 0..<total_rows {
         table.row(&tbl)
-        for column, col_idx in df.column_order {
+        for column, col_idx in df.column_order[:] {
             byte_index := u64(row_idx) / 8
             bit_position := u64(row_idx) % 8
 
@@ -574,8 +598,8 @@ print_dataframe :: proc(df: DataFrame, max_rows: int = 10) {
                     } else {
                         start := row_idx == 0 ? 0 : offsets_array[row_idx-1]
                         end := row_idx >= len(offsets_array) ? i32(len(data_array)) : offsets_array[row_idx]
-                        value := transmute(string)data_array[start:end]
-                        table.set_cell_value(&tbl, row_idx, col_idx, value)
+                        value := truncate_value(data_array[start:end], max_width)
+                        table.set_cell_value(&tbl, row_idx+1, col_idx, value)
                     }
             }
         }
