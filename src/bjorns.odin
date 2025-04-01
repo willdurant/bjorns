@@ -11,6 +11,9 @@ import "core:os"
 import "core:text/table"
 import "core:math"
 import "core:unicode/utf8"
+import "core:time"
+import "core:sys/posix"
+import "core:c"
 
 Type_Category :: enum {
     // Numeric types
@@ -62,6 +65,17 @@ NumericArray :: struct($T: typeid) where intrinsics.type_is_integer(T) || intrin
     is_mutable: bool,
 }
 
+Date32 :: distinct i32
+Date64 :: distinct i64
+
+DateArray :: struct($T: typeid) where type_is_date(T) {
+    values: []T,
+    validity: []byte,
+    a_type: typeid,
+    length: int,
+    is_mutable: bool,
+}
+
 StringArray :: struct {
     values: []byte,
     validity: []byte,
@@ -71,6 +85,7 @@ StringArray :: struct {
     is_mutable: bool,
 }
 
+// TODO(will): Arena allocation for array
 Column :: struct {
     name: string,
     category: typeid,
@@ -88,6 +103,8 @@ Column :: struct {
         NumericArray(f64),
         NumericArray(int),
         NumericArray(uint),
+        DateArray(Date32),
+        DateArray(Date64),
         StringArray,
     },
     dropped: bool
@@ -105,7 +122,15 @@ ColumnReadInfo :: struct {
     bytesize: int,
 }
 
-initialise_numeric_array :: proc($T: typeid, N: int, allocator := context.allocator, string_count: i32 = 0) -> (NumericArray(T), bool) {
+type_is_date :: proc($T: typeid) -> bool {
+    if T == Date32 || T == Date64 {
+        return true
+    }
+
+    return false
+}
+
+initialise_numeric_array :: proc($T: typeid, N: int, allocator := context.allocator) -> (NumericArray(T), bool) {
     if N <= 0 {
         return {}, false
     }
@@ -125,118 +150,24 @@ initialise_numeric_array :: proc($T: typeid, N: int, allocator := context.alloca
     return {}, false
 }
 
-
-numeric_array_from_string :: proc($T: typeid, data: string, allocator := context.allocator) -> (NumericArray(T), bool) {
-    values := strings.split(data, ",", context.temp_allocator)
-    defer(free_all(context.temp_allocator))
-
-    if len(values) == 0 {
+initialise_date_array :: proc($T: typeid, N: int, allocator := context.allocator) -> (StringArray(T), bool) {
+    if N <= 0 {
         return {}, false
     }
 
-    // TODO(will): Make this DRY
-    if intrinsics.type_is_integer(T) {
-        new_array, ok := initialise_numeric_array(T, len(values), allocator)
-        if !ok {
-            return {}, false
+    if type_is_date(T) {
+        array := DateArray(T) {
+            values = make([]T, N, allocator),
+            validity = make([]byte, (N + 7) / 8, allocator),
+            a_type = T,
+            length = N,
+            is_mutable = false,
         }
 
-        for value, i in values {
-            // TODO(will): need to manage potential int overflow
-            trimmed := strings.trim_space(value)
-            n, ok := strconv.parse_int(trimmed)
-            new_array.values[i] = ok ? T(n) : 0
-
-            byte_index := u64(i) / 8
-            bit_position := u64(i) % 8
-            if ok {
-                new_array.validity[byte_index] |= 1 << bit_position
-            }
-        }
-
-        return new_array, true
-    }
-
-    if T == f32 {
-        new_array, ok := initialise_numeric_array(T, len(values), allocator)
-        if !ok {
-            return {}, false
-        }
-        for value, i in values {
-            trimmed := strings.trim_space(value)
-            n, ok := strconv.parse_f32(trimmed)
-            new_array.values[i] = ok ? T(n) : 0
-            
-            byte_index := u64(i) / 8
-            bit_position := u64(i) % 8
-            if ok {
-                new_array.validity[byte_index] |= 1 << bit_position
-            }
-        }
-
-        return new_array, true
-    }
-
-    if T == f64 {
-        new_array, ok := initialise_numeric_array(T, len(values), allocator)
-        if !ok {
-            return {}, false
-        }
-        for value, i in values {
-            trimmed := strings.trim_space(value)
-            n, ok := strconv.parse_f64(trimmed)
-            new_array.values[i] = ok ? T(n) : 0
-            
-            byte_index := u64(i) / 8
-            bit_position := u64(i) % 8
-            if ok {
-                new_array.validity[byte_index] |= 1 << bit_position
-            }
-        }
-
-        return new_array, true
+        return array, true
     }
 
     return {}, false
-}
-
-string_array_from_string :: proc(data: string, allocator := context.allocator) -> (StringArray, bool) {
-    values := strings.split(data, ",", context.temp_allocator)
-    defer(free_all(context.temp_allocator))
-
-    string_count := len(values)
-    if string_count == 0 {
-        return {}, false
-    }
-
-    offset_length := string_count-1
-    strings_combined := strings.concatenate(values, context.temp_allocator)
-
-    new_array := StringArray {
-        values = make([]byte, len(strings_combined), allocator),
-        validity = make([]byte, (string_count + 7) / 8, allocator),
-        offsets = make([]i32, offset_length, allocator),
-        a_type = string,
-        length = len(strings_combined),
-        is_mutable = false,
-    }
-    copy(new_array.values, transmute([]byte)strings_combined)
-
-    byte_count := 0
-    for value, i in values {
-        if i < string_count-1 {
-            byte_count += len(value)
-            new_array.offsets[i] = i32(byte_count)
-        }
-
-        byte_index := u64(i) / 8
-        bit_position := u64(i) % 8
-        if value != "" {
-            new_array.validity[byte_index] |= 1 << bit_position
-        }
-    }
-
-    return new_array, true
 }
 
 print_numeric_array :: proc(array: $A/NumericArray($T)) {
@@ -267,6 +198,41 @@ print_numeric_array :: proc(array: $A/NumericArray($T)) {
     }
 }
 
+date32_to_ymd :: proc(days: Date32) -> (year: int, month: int, day: int) {
+    seconds := i64(days) * 24 * 60 * 60
+    target_date := time.unix(seconds, 0)
+    year, month, day := time.date(target_date)
+
+    return year, int(month), day
+}
+
+date64_to_ymd :: proc(milliseconds: Date64) -> (year: int, month: int, day: int) {
+    seconds := i64(milliseconds) / 1000
+    nanoseconds := (i64(milliseconds) % 1000) * 1_000_000
+    target_date := time.unix(seconds, milliseconds)
+    year, month, day := time.date(target_date)
+
+    return year, int(month), day
+}
+
+date_to_ymd :: proc{date32_to_ymd, date64_to_ymd}
+
+print_date_array :: proc(array: $A/DateArray($T)) {
+    if type_is_date(T) {
+        for i := 0; i < array.length; i += 1 {
+            byte_index := u64(i) / 8
+            bit_position := u64(i) % 8
+
+            if ((array.validity[byte_index] >> bit_position) & 1) == 1 {
+                year, month, day := date_to_ymd(array.values[i])
+                fmt.printfln("%02d-%02d-%d", day, month, year)
+            } else {
+                fmt.println("null")
+            }
+        }
+    }
+}
+
 print_string_array :: proc(array: StringArray) {
     // TODO(will): Fix preceding whitespace occuring in strings
     string_length := len(array.offsets) + 1
@@ -289,6 +255,7 @@ print_string_array :: proc(array: StringArray) {
     }
 }
 
+// TODO(will): Destroy dataframe proc, including df allocation and each column arena
 init_dataframe :: proc(allocator := context.allocator) -> DataFrame {
     df := DataFrame{
         columns = make(map[string]Column, 0, allocator),
